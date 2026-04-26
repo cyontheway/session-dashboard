@@ -849,12 +849,6 @@ function renderSearchResults(results, query) {
     const timeSpan = document.createElement('span');
     timeSpan.textContent = timeAgo(r.lastModified);
     footerDiv.appendChild(countSpan);
-    if (s.models && s.models.length > 0) {
-      const modelTag = document.createElement('span');
-      modelTag.className = 'model-tag';
-      modelTag.textContent = s.models.length === 1 ? s.models[0] : s.models[0] + ` +${s.models.length - 1}`;
-      footerDiv.appendChild(modelTag);
-    }
     footerDiv.appendChild(timeSpan);
 
     div.appendChild(footerDiv);

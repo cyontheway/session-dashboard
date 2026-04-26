@@ -317,6 +317,32 @@ body { display: flex; overflow: hidden; }
   gap: 6px;
 }
 .session-title .hash { color: var(--accent); font-weight: 700; }
+.model-tag {
+  font-size: 10px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  padding: 1px 6px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0 4px;
+}
+
+.load-more {
+  text-align: center;
+  padding: 12px;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+  transition: background 0.15s;
+}
+.load-more:hover {
+  background: var(--bg-hover);
+}
 
 .star-btn {
   margin-left: auto;

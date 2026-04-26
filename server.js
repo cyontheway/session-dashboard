@@ -4,30 +4,21 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const os = require('os');
+const { execFile } = require('child_process');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const SOURCES = {
-  live: path.join(os.homedir(), '.claude', 'projects'),
-};
-
-// Optional: set BACKUP_DIR env var to enable backup source
-// e.g. BACKUP_DIR=~/my-backup/projects node server.js
-if (process.env.BACKUP_DIR) {
-  SOURCES.backup = process.env.BACKUP_DIR.replace(/^~/, os.homedir());
-}
-
+const BACKUP_DIR = process.env.BACKUP_DIR;
+const BACKUP_DEST = process.env.BACKUP_DEST || path.join(os.homedir(), 'claude-session-backups');
+const SOURCES = { live: path.join(os.homedir(), '.claude', 'projects') };
+if (BACKUP_DIR) SOURCES.backup = BACKUP_DIR;
 let currentSource = 'live';
 let CLAUDE_PROJECTS_DIR = SOURCES.live;
 
 // Data source switching
-app.get('/api/source', (req, res) => res.json({
-  source: currentSource,
-  path: CLAUDE_PROJECTS_DIR,
-  available: Object.keys(SOURCES),
-}));
+app.get('/api/source', (req, res) => res.json({ source: currentSource, path: CLAUDE_PROJECTS_DIR }));
 app.post('/api/source', (req, res) => {
   const s = req.body.source;
   if (!SOURCES[s]) return res.status(400).json({ error: 'Invalid source. Use "live" or "backup".' });
@@ -109,6 +100,7 @@ app.get('/api/projects', async (req, res) => {
 });
 
 // GET /api/projects/:projectId/sessions — list sessions for a project
+// Supports ?limit=N&offset=N for pagination
 app.get('/api/projects/:projectId/sessions', async (req, res) => {
   try {
     const projDir = safePath(CLAUDE_PROJECTS_DIR, req.params.projectId);
@@ -120,15 +112,30 @@ app.get('/api/projects/:projectId/sessions', async (req, res) => {
       return res.status(404).json({ error: 'Project not found' });
     }
 
-    const files = (await fs.promises.readdir(projDir)).filter(f => f.endsWith('.jsonl'));
-    const sessions = [];
+    const limit = parseInt(req.query.limit) || 0;
+    const offset = parseInt(req.query.offset) || 0;
 
-    for (const file of files) {
+    const files = (await fs.promises.readdir(projDir)).filter(f => f.endsWith('.jsonl'));
+
+    // Stat all files (fast, no content read) then sort by mtime desc
+    const fileStats = await Promise.all(
+      files.map(async (f) => {
+        const fp = path.join(projDir, f);
+        const stat = await fs.promises.stat(fp);
+        return { file: f, mtimeMs: stat.mtimeMs };
+      })
+    );
+    fileStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    const total = fileStats.length;
+    const slice = limit > 0 ? fileStats.slice(offset, offset + limit) : fileStats;
+
+    // Only scan content for the visible files
+    const sessions = [];
+    for (const { file } of slice) {
       const sessionId = file.replace('.jsonl', '');
       const filePath = path.join(projDir, file);
       const stat = await fs.promises.stat(filePath);
-
-      // Quick scan: read first and last few lines for metadata
       const meta = await scanSessionMeta(filePath);
 
       sessions.push({
@@ -141,12 +148,15 @@ app.get('/api/projects/:projectId/sessions', async (req, res) => {
         firstUserMessage: meta.firstUserMessage,
         startTime: meta.startTime,
         isEmpty: meta.isEmpty,
+        models: meta.models || [],
       });
     }
 
-    // Sort by last modified descending
-    sessions.sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
-    res.json(sessions);
+    if (limit > 0) {
+      res.json({ sessions, total, offset, limit });
+    } else {
+      res.json(sessions);
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -194,6 +204,7 @@ async function scanSessionMeta(filePath) {
     let firstUserMessage = '';
     let startTime = null;
     let hasRealUserMessage = false;
+    const modelSet = new Set();
 
     const rl = readline.createInterface({
       input: fs.createReadStream(filePath),
@@ -214,6 +225,9 @@ async function scanSessionMeta(filePath) {
               }
             }
           }
+          if (d.type === 'assistant' && d.message?.model) {
+            modelSet.add(d.message.model);
+          }
           if (!startTime && d.timestamp) {
             startTime = d.timestamp;
           }
@@ -226,11 +240,11 @@ async function scanSessionMeta(filePath) {
 
     rl.on('close', () => {
       const isEmpty = messageCount === 0 || !hasRealUserMessage;
-      resolve({ messageCount, title, firstUserMessage, startTime, isEmpty });
+      resolve({ messageCount, title, firstUserMessage, startTime, isEmpty, models: Array.from(modelSet) });
     });
 
     rl.on('error', () => {
-      resolve({ messageCount: 0, title: '', firstUserMessage: '', startTime: null, isEmpty: true });
+      resolve({ messageCount: 0, title: '', firstUserMessage: '', startTime: null, isEmpty: true, models: [] });
     });
   });
 }
@@ -558,6 +572,38 @@ app.get('/api/projects/:projectId/sessions/:sessionId/export', async (req, res) 
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${req.params.sessionId}.md"`);
     res.send(md);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/backup — backup sessions to local directory
+app.post('/api/backup', async (req, res) => {
+  const backupBase = BACKUP_DEST;
+  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const projectId = req.body.projectId;
+  const src = projectId
+    ? path.join(CLAUDE_PROJECTS_DIR, projectId)
+    : CLAUDE_PROJECTS_DIR;
+
+  try { await fs.promises.access(src); }
+  catch { return res.status(404).json({ error: 'Source not found' }); }
+
+  const destName = projectId
+    ? `session-backup-${projectId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30)}-${dateStr}`
+    : `session-backup-${dateStr}`;
+  const dest = path.join(backupBase, destName);
+
+  await fs.promises.mkdir(backupBase, { recursive: true });
+
+  try {
+    await new Promise((resolve, reject) => {
+      execFile('cp', ['-r', src, dest], (err) => { if (err) reject(err); else resolve(); });
+    });
+    const du = await new Promise((resolve) => {
+      execFile('du', ['-sh', dest], (err, stdout) => resolve(err ? '?' : stdout.split('\t')[0]));
+    });
+    res.json({ path: dest, size: du });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

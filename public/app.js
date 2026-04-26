@@ -42,6 +42,11 @@ let lastSearchQueryText = ''; // the query that produced lastSearchResults
 let currentSourcePath = '~/.claude/projects'; // updated on source switch
 let showEmpty = localStorage.getItem('sd-showEmpty') === 'true';
 
+// Pagination
+const PAGE_SIZE = 50;
+let sessionsTotal = 0;
+let isLoadingMore = false;
+
 // ── Favorites (stored in localStorage) ──
 let favorites = new Set(JSON.parse(localStorage.getItem('sd-favorites') || '[]'));
 
@@ -157,6 +162,9 @@ function updateStatsBar(sessions) {
   const totalMsgs = sessions.reduce((s, x) => s + x.messageCount, 0);
 
   let text = `${visibleCount} sessions · ${totalMsgs} total messages`;
+  if (sessionsTotal > 0 && currentSessions.length < sessionsTotal) {
+    text = `已加载 ${currentSessions.length}/${sessionsTotal} · ${totalMsgs} 条消息`;
+  }
   if (emptyCount > 0) {
     text += ` · ${emptyCount} 空会话`;
   }
@@ -213,15 +221,6 @@ async function init() {
     showError('无法连接服务端：' + err.message);
   }
   await loadProjects();
-
-  // Hide backup UI if no backup source configured
-  try {
-    const sourceInfo = await apiFetch(`${API}/api/source`);
-    if (!sourceInfo.available || !sourceInfo.available.includes('backup')) {
-      document.getElementById('source-toggle').style.display = 'none';
-      document.getElementById('backup-btn').style.display = 'none';
-    }
-  } catch {}
 }
 
 async function loadProjects() {
@@ -325,8 +324,18 @@ async function selectProject(projectId) {
   loadingDiv.appendChild(document.createTextNode('Loading sessions...'));
   container.appendChild(loadingDiv);
 
+  // Reset pagination
+  sessionsTotal = 0;
+
   try {
-    currentSessions = await apiFetch(`${API}/api/projects/${projectId}/sessions`);
+    const result = await apiFetch(`${API}/api/projects/${projectId}/sessions?limit=${PAGE_SIZE}&offset=0`);
+    if (Array.isArray(result)) {
+      currentSessions = result;
+      sessionsTotal = result.length;
+    } else {
+      currentSessions = result.sessions;
+      sessionsTotal = result.total;
+    }
   } catch (err) {
     showError('加载会话列表失败：' + err.message);
     currentSessions = [];
@@ -342,6 +351,24 @@ async function selectProject(projectId) {
     updateProjectBadge(projectId);
     updateTotalBadge();
   }
+}
+
+// ── Pagination ──
+async function loadMoreSessions() {
+  if (isLoadingMore || !currentProjectId || currentProjectId === '__all__') return;
+  isLoadingMore = true;
+  const offset = currentSessions.length;
+  try {
+    const result = await apiFetch(`${API}/api/projects/${currentProjectId}/sessions?limit=${PAGE_SIZE}&offset=${offset}`);
+    const newSessions = Array.isArray(result) ? result : result.sessions;
+    sessionsTotal = result.total || newSessions.length;
+    currentSessions = [...currentSessions, ...newSessions];
+    updateStatsBar(currentSessions);
+    renderSessions(applyEmptyFilter(currentSessions));
+  } catch (err) {
+    showError('加载更多失败：' + err.message);
+  }
+  isLoadingMore = false;
 }
 
 function renderSessions(sessions) {
@@ -374,6 +401,13 @@ function renderSessions(sessions) {
     titleDiv.appendChild(hash);
     titleDiv.appendChild(document.createTextNode(s.title));
 
+    // Model tag
+    if (s.models && s.models.length > 0) {
+      const modelTag = document.createElement('span');
+      modelTag.className = 'model-tag';
+      modelTag.textContent = s.models.length === 1 ? s.models[0] : s.models[0] + ` +${s.models.length - 1}`;
+    }
+
     // Star button
     const starBtn = document.createElement('span');
     starBtn.className = 'star-btn' + (isFavorite(s.id) ? ' active' : '');
@@ -397,12 +431,28 @@ function renderSessions(sessions) {
     const timeSpan = document.createElement('span');
     timeSpan.textContent = timeAgo(s.lastModified);
     footerDiv.appendChild(countSpan);
+    if (s.models && s.models.length > 0) {
+      const modelTag = document.createElement('span');
+      modelTag.className = 'model-tag';
+      modelTag.textContent = s.models.length === 1 ? s.models[0] : s.models[0] + ` +${s.models.length - 1}`;
+      footerDiv.appendChild(modelTag);
+    }
     footerDiv.appendChild(timeSpan);
 
     div.appendChild(titleDiv);
     div.appendChild(pathDiv);
     div.appendChild(footerDiv);
     container.appendChild(div);
+  }
+
+  // Load more button
+  if (sessionsTotal > 0 && currentSessions.length < sessionsTotal) {
+    const moreDiv = document.createElement('div');
+    moreDiv.className = 'load-more';
+    const remaining = sessionsTotal - currentSessions.length;
+    moreDiv.textContent = `加载更多（剩余 ${remaining} 条）`;
+    moreDiv.addEventListener('click', loadMoreSessions);
+    container.appendChild(moreDiv);
   }
 }
 
@@ -799,6 +849,12 @@ function renderSearchResults(results, query) {
     const timeSpan = document.createElement('span');
     timeSpan.textContent = timeAgo(r.lastModified);
     footerDiv.appendChild(countSpan);
+    if (s.models && s.models.length > 0) {
+      const modelTag = document.createElement('span');
+      modelTag.className = 'model-tag';
+      modelTag.textContent = s.models.length === 1 ? s.models[0] : s.models[0] + ` +${s.models.length - 1}`;
+      footerDiv.appendChild(modelTag);
+    }
     footerDiv.appendChild(timeSpan);
 
     div.appendChild(footerDiv);
@@ -930,6 +986,13 @@ function renderAllSessions(sessions) {
     titleDiv.appendChild(hash);
     titleDiv.appendChild(document.createTextNode(s.title));
 
+    // Model tag
+    if (s.models && s.models.length > 0) {
+      const modelTag = document.createElement('span');
+      modelTag.className = 'model-tag';
+      modelTag.textContent = s.models.length === 1 ? s.models[0] : s.models[0] + ` +${s.models.length - 1}`;
+    }
+
     // Star button
     const starBtn = document.createElement('span');
     starBtn.className = 'star-btn' + (isFavorite(s.id) ? ' active' : '');
@@ -953,6 +1016,12 @@ function renderAllSessions(sessions) {
     const timeSpan = document.createElement('span');
     timeSpan.textContent = timeAgo(s.lastModified);
     footerDiv.appendChild(countSpan);
+    if (s.models && s.models.length > 0) {
+      const modelTag = document.createElement('span');
+      modelTag.className = 'model-tag';
+      modelTag.textContent = s.models.length === 1 ? s.models[0] : s.models[0] + ` +${s.models.length - 1}`;
+      footerDiv.appendChild(modelTag);
+    }
     footerDiv.appendChild(timeSpan);
 
     div.appendChild(titleDiv);
@@ -968,6 +1037,7 @@ document.getElementById('refresh-btn').addEventListener('click', async () => {
   init();
 });
 
+
 // ── Backup ──
 document.getElementById('backup-btn').addEventListener('click', async () => {
   const btn = document.getElementById('backup-btn');
@@ -976,7 +1046,7 @@ document.getElementById('backup-btn').addEventListener('click', async () => {
     : null;
 
   const label = proj ? proj.name : '全部项目';
-  if (!confirm(`备份「${label}」的会话数据？\n保存到 ~/Personal/session-backups/`)) return;
+  if (!confirm(`备份「${label}」的会话数据？\n保存至 $HOME/<your-backup-path>/`)) return;
 
   btn.disabled = true;
   btn.textContent = '💾 备份中...';

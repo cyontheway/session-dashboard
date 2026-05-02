@@ -19,7 +19,7 @@
     <button class="theme-toggle" id="theme-toggle" title="切换深浅主题">🌙</button>
   </div>
   <div class="all-sessions-btn active" id="all-sessions-btn">
-    <span>📋 All Sessions</span>
+    <span>📋 All CLI</span>
     <span class="badge" id="total-sessions-badge">0</span>
   </div>
   <div class="section-label">PROJECTS (<span id="project-count">0</span>)</div>
@@ -28,8 +28,10 @@
     <button class="source-btn active" data-source="live">Live</button>
     <button class="source-btn" data-source="backup">Backup</button>
   </div>
-  <button class="refresh-btn" id="refresh-btn" title="刷新数据并释放搜索缓存">🔄 刷新 / 清缓存</button>
-  <button class="refresh-btn" id="backup-btn" title="将会话数据备份到本地目录">💾 Backup</button>
+  <div class="refresh-row">
+    <button class="refresh-btn" id="refresh-btn" title="刷新数据并释放搜索缓存">🔄 刷新 / 清缓存</button>
+    <button class="refresh-btn" id="backup-btn" title="备份会话数据到本地">💾 备份数据</button>
+  </div>
 </div>
 
 <div class="resize-handle" id="resize-handle-1"></div>
@@ -37,7 +39,7 @@
 <!-- Middle: Sessions -->
 <div id="sessions-panel">
   <div class="sessions-header" id="sessions-header">
-    <span id="sessions-header-text">ALL SESSIONS</span>
+    <span id="sessions-header-text">ALL CLI</span>
     <button class="empty-toggle-btn" id="empty-toggle-btn" style="display:none">🔍 显示空会话</button>
   </div>
   <div class="search-box">

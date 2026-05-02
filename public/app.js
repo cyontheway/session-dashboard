@@ -238,7 +238,7 @@ async function loadProjects() {
   renderProjects();
 
   // Reset middle and right panels on reload
-  document.getElementById('sessions-header-text').textContent = 'ALL SESSIONS';
+  document.getElementById('sessions-header-text').textContent = 'ALL CLI';
   document.getElementById('sessions-list').textContent = '';
   const emptyDiv = document.createElement('div');
   emptyDiv.className = 'sessions-empty';
@@ -907,13 +907,13 @@ function getFilteredSessions(query) {
   return getFilteredSessionsLocal(q);
 }
 
-// ── All Sessions (concurrent fetch) ──
+// ── All CLI (concurrent fetch) ──
 document.getElementById('all-sessions-btn').addEventListener('click', async () => {
   currentProjectId = null;
   currentSessionId = null;
   document.getElementById('all-sessions-btn').classList.add('active');
   document.querySelectorAll('.project-item').forEach(el => el.classList.remove('active'));
-  document.getElementById('sessions-header-text').textContent = 'ALL SESSIONS';
+  document.getElementById('sessions-header-text').textContent = 'ALL CLI';
 
   const container = document.getElementById('sessions-list');
   container.textContent = '';
@@ -1031,7 +1031,6 @@ document.getElementById('refresh-btn').addEventListener('click', async () => {
   init();
 });
 
-
 // ── Backup ──
 document.getElementById('backup-btn').addEventListener('click', async () => {
   const btn = document.getElementById('backup-btn');
@@ -1040,7 +1039,7 @@ document.getElementById('backup-btn').addEventListener('click', async () => {
     : null;
 
   const label = proj ? proj.name : '全部项目';
-  if (!confirm(`备份「${label}」的会话数据？\n保存至 $HOME/<your-backup-path>/`)) return;
+  if (!confirm(`备份「${label}」的会话数据？\n保存到 ~/Personal/session-backups/`)) return;
 
   btn.disabled = true;
   btn.textContent = '💾 备份中...';

@@ -28,6 +28,14 @@ npm start
 # 浏览器打开 http://localhost:3456
 ```
 
+> 💡 **快捷启动**：建议在 shell 配置文件（`~/.zshrc`、`~/.bashrc` 等）加个 alias 或函数，一键启动：
+> ```bash
+> dashboard() {
+>   cd ~/path/to/session-dashboard-dist && node server.js &
+>   open http://localhost:3456  # 其他系统换成 xdg-open（Linux）或 start（Windows）
+> }
+> ```
+
 ## 高级配置
 
 | 环境变量 | 默认值 | 说明 |

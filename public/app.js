@@ -42,13 +42,12 @@ let lastSearchQueryText = ''; // the query that produced lastSearchResults
 let currentSourcePath = '~/.claude/projects'; // updated on source switch
 let showEmpty = localStorage.getItem('sd-showEmpty') === 'true';
 
-// Pagination
-const PAGE_SIZE = 50;
-let sessionsTotal = 0;
-let isLoadingMore = false;
-
 // ── Favorites (stored in localStorage) ──
 let favorites = new Set(JSON.parse(localStorage.getItem('sd-favorites') || '[]'));
+
+// ── PI state ──
+let piProjects = [];
+let currentPiProjectId = null;
 
 function toggleFavorite(sessionId) {
   if (favorites.has(sessionId)) {
@@ -162,9 +161,6 @@ function updateStatsBar(sessions) {
   const totalMsgs = sessions.reduce((s, x) => s + x.messageCount, 0);
 
   let text = `${visibleCount} sessions · ${totalMsgs} total messages`;
-  if (sessionsTotal > 0 && currentSessions.length < sessionsTotal) {
-    text = `已加载 ${currentSessions.length}/${sessionsTotal} · ${totalMsgs} 条消息`;
-  }
   if (emptyCount > 0) {
     text += ` · ${emptyCount} 空会话`;
   }
@@ -221,6 +217,57 @@ async function init() {
     showError('无法连接服务端：' + err.message);
   }
   await loadProjects();
+  await loadPiProjects();
+
+  // Hide backup UI if no backup source configured
+  try {
+    const sourceInfo = await apiFetch(`${API}/api/source`);
+    if (!sourceInfo.available || !sourceInfo.available.includes('backup')) {
+      document.getElementById('source-toggle').style.display = 'none';
+      document.getElementById('backup-btn').style.display = 'none';
+    }
+  } catch {}
+}
+
+// ── PI ──
+let piProjects = [];
+let currentPiProjectId = null;
+
+async function loadPiProjects() {
+  try {
+    piProjects = await apiFetch(`${API}/api/pi/projects`);
+  } catch (err) {
+    console.warn('加载 PI 项目失败:', err.message);
+    piProjects = [];
+  }
+  renderPiProjects(piProjects);
+  const totalSessions = piProjects.reduce((s, p) => s + p.sessionCount, 0);
+  document.getElementById('pi-total-badge').textContent = totalSessions;
+}
+
+function renderPiProjects(projects) {
+  const container = document.getElementById('pi-projects-list');
+  const allBtn = container.querySelector('#pi-all-btn');
+  container.textContent = '';
+  container.appendChild(allBtn);
+
+  for (const proj of projects) {
+    const div = document.createElement('div');
+    div.className = 'pi-project-item';
+    div.dataset.projectId = proj.id;
+    div.addEventListener('click', () => selectPiProject(proj.id));
+
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = proj.name;
+
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = `${proj.sessionCount}`;
+
+    div.appendChild(nameSpan);
+    div.appendChild(badge);
+    container.appendChild(div);
+  }
 }
 
 async function loadProjects() {
@@ -238,7 +285,7 @@ async function loadProjects() {
   renderProjects();
 
   // Reset middle and right panels on reload
-  document.getElementById('sessions-header-text').textContent = 'ALL CLI';
+  document.getElementById('sessions-header-text').textContent = 'Claude Code';
   document.getElementById('sessions-list').textContent = '';
   const emptyDiv = document.createElement('div');
   emptyDiv.className = 'sessions-empty';
@@ -300,9 +347,14 @@ async function selectProject(projectId) {
   deepSearchBtn.classList.remove('active');
   hideSearchStatus();
 
+  currentViewMode = 'cli';
+  currentPiProjectId = null;
+
   // Update active states
   document.getElementById('all-sessions-btn').classList.remove('active');
+  document.getElementById('pi-all-btn').classList.remove('active');
   document.querySelectorAll('.project-item').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.pi-project-item').forEach(el => el.classList.remove('active'));
   const items = document.querySelectorAll('.project-item');
   for (const item of items) {
     if (item.querySelector('.project-name')?.title === allProjects.find(p => p.id === projectId)?.path) {
@@ -324,18 +376,8 @@ async function selectProject(projectId) {
   loadingDiv.appendChild(document.createTextNode('Loading sessions...'));
   container.appendChild(loadingDiv);
 
-  // Reset pagination
-  sessionsTotal = 0;
-
   try {
-    const result = await apiFetch(`${API}/api/projects/${projectId}/sessions?limit=${PAGE_SIZE}&offset=0`);
-    if (Array.isArray(result)) {
-      currentSessions = result;
-      sessionsTotal = result.length;
-    } else {
-      currentSessions = result.sessions;
-      sessionsTotal = result.total;
-    }
+    currentSessions = await apiFetch(`${API}/api/projects/${projectId}/sessions`);
   } catch (err) {
     showError('加载会话列表失败：' + err.message);
     currentSessions = [];
@@ -351,24 +393,6 @@ async function selectProject(projectId) {
     updateProjectBadge(projectId);
     updateTotalBadge();
   }
-}
-
-// ── Pagination ──
-async function loadMoreSessions() {
-  if (isLoadingMore || !currentProjectId || currentProjectId === '__all__') return;
-  isLoadingMore = true;
-  const offset = currentSessions.length;
-  try {
-    const result = await apiFetch(`${API}/api/projects/${currentProjectId}/sessions?limit=${PAGE_SIZE}&offset=${offset}`);
-    const newSessions = Array.isArray(result) ? result : result.sessions;
-    sessionsTotal = result.total || newSessions.length;
-    currentSessions = [...currentSessions, ...newSessions];
-    updateStatsBar(currentSessions);
-    renderSessions(applyEmptyFilter(currentSessions));
-  } catch (err) {
-    showError('加载更多失败：' + err.message);
-  }
-  isLoadingMore = false;
 }
 
 function renderSessions(sessions) {
@@ -401,13 +425,6 @@ function renderSessions(sessions) {
     titleDiv.appendChild(hash);
     titleDiv.appendChild(document.createTextNode(s.title));
 
-    // Model tag
-    if (s.models && s.models.length > 0) {
-      const modelTag = document.createElement('span');
-      modelTag.className = 'model-tag';
-      modelTag.textContent = s.models.length === 1 ? s.models[0] : s.models[0] + ` +${s.models.length - 1}`;
-    }
-
     // Star button
     const starBtn = document.createElement('span');
     starBtn.className = 'star-btn' + (isFavorite(s.id) ? ' active' : '');
@@ -431,28 +448,12 @@ function renderSessions(sessions) {
     const timeSpan = document.createElement('span');
     timeSpan.textContent = timeAgo(s.lastModified);
     footerDiv.appendChild(countSpan);
-    if (s.models && s.models.length > 0) {
-      const modelTag = document.createElement('span');
-      modelTag.className = 'model-tag';
-      modelTag.textContent = s.models.length === 1 ? s.models[0] : s.models[0] + ` +${s.models.length - 1}`;
-      footerDiv.appendChild(modelTag);
-    }
     footerDiv.appendChild(timeSpan);
 
     div.appendChild(titleDiv);
     div.appendChild(pathDiv);
     div.appendChild(footerDiv);
     container.appendChild(div);
-  }
-
-  // Load more button
-  if (sessionsTotal > 0 && currentSessions.length < sessionsTotal) {
-    const moreDiv = document.createElement('div');
-    moreDiv.className = 'load-more';
-    const remaining = sessionsTotal - currentSessions.length;
-    moreDiv.textContent = `加载更多（剩余 ${remaining} 条）`;
-    moreDiv.addEventListener('click', loadMoreSessions);
-    container.appendChild(moreDiv);
   }
 }
 
@@ -478,7 +479,7 @@ async function selectSession(sessionId) {
 
   try {
     const res = await apiFetch(`${API}/api/projects/${currentProjectId}/sessions/${sessionId}`);
-    const session = currentSessions.find(s => s.id === sessionId);
+    const session = currentSessions.find(s => s.id === sessionId) || { id: sessionId };
     renderDetail(session, res);
   } catch (err) {
     showError('加载会话详情失败：' + err.message);
@@ -523,7 +524,8 @@ function renderDetail(session, messages) {
   exportBtn.className = 'export-btn';
   exportBtn.textContent = '📥 导出 Markdown';
   exportBtn.title = '导出当前会话为 Markdown 文件';
-  exportBtn.addEventListener('click', () => exportSession(session.id));
+  const sessionIdForExport = session?.id || currentSessionId;
+  exportBtn.addEventListener('click', () => exportSession(sessionIdForExport));
 
   header.appendChild(closeBtn);
   header.appendChild(titleSpan);
@@ -747,8 +749,75 @@ deepSearchBtn.addEventListener('click', () => {
 });
 
 async function performSearch(query, deep) {
-  // No project selected or in "all" mode: fall back to local filter
-  if (!currentProjectId || currentProjectId === '__all__') {
+  // PI mode: server full-text search
+  if (currentViewMode === 'pi') {
+    if (isSearching) return;
+    isSearching = true;
+    lastSearchQuery = query;
+    showSearchStatus('🔍 PI 搜索中…');
+
+    try {
+      let results = [];
+      if (currentPiProjectId) {
+        const data = await apiFetch(
+          `${API}/api/pi/search?q=${encodeURIComponent(query)}&project=${encodeURIComponent(currentPiProjectId)}`
+        );
+        results = data.results.map(r => ({ ...r, _piProjectId: currentPiProjectId }));
+      } else {
+        for (const proj of piProjects) {
+          const data = await apiFetch(
+            `${API}/api/pi/search?q=${encodeURIComponent(query)}&project=${encodeURIComponent(proj.id)}`
+          );
+          for (const r of data.results) r._piProjectId = proj.id;
+          results.push(...data.results);
+          if (results.length >= 100) break;
+        }
+      }
+      showSearchStatus(results.length === 0 ? 'PI 无结果' : `${results.length} 条结果`);
+      renderSearchResults(results, query);
+    } catch (err) {
+      showError('PI 搜索失败：' + err.message);
+      hideSearchStatus();
+    }
+
+    isSearching = false;
+    return;
+  }
+
+  // ALL CLI mode: search across all projects
+  if (currentProjectId === '__all__') {
+    if (isSearching) return;
+    isSearching = true;
+    lastSearchQuery = query;
+    showSearchStatus('🔍 全部 CLI 搜索中…');
+
+    try {
+      const results = [];
+      for (const proj of allProjects) {
+        const data = await apiFetch(
+          `${API}/api/projects/${proj.id}/search?q=${encodeURIComponent(query)}&deep=1`
+        );
+        for (const r of data.results) {
+          r._projectId = proj.id;
+          r._projectPath = proj.path;
+        }
+        results.push(...data.results);
+        if (results.length >= 100) break;
+      }
+
+      showSearchStatus(results.length === 0 ? '全部 CLI 无结果' : `${results.length} 条结果`);
+      renderSearchResults(results, query);
+    } catch (err) {
+      showError('搜索失败：' + err.message);
+      hideSearchStatus();
+    }
+
+    isSearching = false;
+    return;
+  }
+
+  // No project selected: local filter fallback
+  if (!currentProjectId) {
     const filtered = getFilteredSessionsLocal(query);
     renderSessions(filtered);
     return;
@@ -797,21 +866,40 @@ function renderSearchResults(results, query) {
   const container = document.getElementById('sessions-list');
   container.textContent = '';
 
+  const isPi = currentViewMode === 'pi';
+  const isAllCli = currentProjectId === '__all__';
+
   for (const r of results) {
-    // Try to find full session info from currentSessions
     const sessionInfo = currentSessions.find(s => s.id === r.sessionId);
 
     const div = document.createElement('div');
     div.className = 'session-item';
     div._sessionId = r.sessionId;
+
+    // Click handler based on mode
     div.addEventListener('click', (e) => {
       if (e.target.closest('.star-btn')) return;
       currentSessionId = r.sessionId;
-      selectSession(r.sessionId);
+      if (isPi) {
+        selectPiSession(r.sessionId, r._piProjectId);
+      } else if (isAllCli) {
+        currentProjectId = r._projectId;
+        selectSession(r.sessionId);
+      } else {
+        selectSession(r.sessionId);
+      }
     });
 
     const titleDiv = document.createElement('div');
     titleDiv.className = 'session-title';
+
+    // Source badge
+    const badge = document.createElement('span');
+    badge.className = 'source-badge';
+    badge.textContent = isPi ? 'PI' : 'CLI';
+    badge.classList.add(isPi ? 'pi' : 'cli');
+    titleDiv.appendChild(badge);
+
     const hash = document.createElement('span');
     hash.className = 'hash';
     hash.textContent = '#';
@@ -833,6 +921,21 @@ function renderSearchResults(results, query) {
 
     div.appendChild(titleDiv);
 
+    // Path line
+    if (isPi && r._piProjectId) {
+      const proj = piProjects.find(p => p.id === r._piProjectId);
+      const pathDiv = document.createElement('div');
+      pathDiv.className = 'session-path';
+      pathDiv.textContent = proj ? `${proj.name} · ${r.sessionId}` : r.sessionId;
+      div.appendChild(pathDiv);
+    } else if (isAllCli && r._projectId) {
+      const proj = allProjects.find(p => p.id === r._projectId);
+      const pathDiv = document.createElement('div');
+      pathDiv.className = 'session-path';
+      pathDiv.textContent = proj ? `${proj.path} · ${r.sessionId}` : r.sessionId;
+      div.appendChild(pathDiv);
+    }
+
     // Snippet with highlighted match
     if (r.snippet) {
       const snippetDiv = document.createElement('div');
@@ -843,12 +946,14 @@ function renderSearchResults(results, query) {
 
     const footerDiv = document.createElement('div');
     footerDiv.className = 'session-footer';
-    const countSpan = document.createElement('span');
-    countSpan.className = 'msg-count';
-    countSpan.textContent = sessionInfo ? `${sessionInfo.messageCount} messages` : '';
+    if (sessionInfo) {
+      const countSpan = document.createElement('span');
+      countSpan.className = 'msg-count';
+      countSpan.textContent = `${sessionInfo.messageCount} messages`;
+      footerDiv.appendChild(countSpan);
+    }
     const timeSpan = document.createElement('span');
     timeSpan.textContent = timeAgo(r.lastModified);
-    footerDiv.appendChild(countSpan);
     footerDiv.appendChild(timeSpan);
 
     div.appendChild(footerDiv);
@@ -886,7 +991,9 @@ function hideSearchStatus() {
   searchStatus.classList.remove('visible');
 }
 
-// Local filter fallback (for "all sessions" mode or when no project selected)
+
+
+// Local filter fallback (for when no project selected)
 function getFilteredSessionsLocal(query) {
   const q = (query || '').toLowerCase();
   if (!q) return currentSessions;
@@ -907,13 +1014,17 @@ function getFilteredSessions(query) {
   return getFilteredSessionsLocal(q);
 }
 
-// ── All CLI (concurrent fetch) ──
+// ── All Sessions (concurrent fetch) ──
 document.getElementById('all-sessions-btn').addEventListener('click', async () => {
   currentProjectId = null;
   currentSessionId = null;
+  currentViewMode = 'cli';
+  currentPiProjectId = null;
   document.getElementById('all-sessions-btn').classList.add('active');
   document.querySelectorAll('.project-item').forEach(el => el.classList.remove('active'));
-  document.getElementById('sessions-header-text').textContent = 'ALL CLI';
+  document.querySelectorAll('.pi-project-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('pi-all-btn').classList.remove('active');
+  document.getElementById('sessions-header-text').textContent = 'Claude Code';
 
   const container = document.getElementById('sessions-list');
   container.textContent = '';
@@ -980,13 +1091,6 @@ function renderAllSessions(sessions) {
     titleDiv.appendChild(hash);
     titleDiv.appendChild(document.createTextNode(s.title));
 
-    // Model tag
-    if (s.models && s.models.length > 0) {
-      const modelTag = document.createElement('span');
-      modelTag.className = 'model-tag';
-      modelTag.textContent = s.models.length === 1 ? s.models[0] : s.models[0] + ` +${s.models.length - 1}`;
-    }
-
     // Star button
     const starBtn = document.createElement('span');
     starBtn.className = 'star-btn' + (isFavorite(s.id) ? ' active' : '');
@@ -1010,12 +1114,6 @@ function renderAllSessions(sessions) {
     const timeSpan = document.createElement('span');
     timeSpan.textContent = timeAgo(s.lastModified);
     footerDiv.appendChild(countSpan);
-    if (s.models && s.models.length > 0) {
-      const modelTag = document.createElement('span');
-      modelTag.className = 'model-tag';
-      modelTag.textContent = s.models.length === 1 ? s.models[0] : s.models[0] + ` +${s.models.length - 1}`;
-      footerDiv.appendChild(modelTag);
-    }
     footerDiv.appendChild(timeSpan);
 
     div.appendChild(titleDiv);
@@ -1023,6 +1121,211 @@ function renderAllSessions(sessions) {
     div.appendChild(footerDiv);
     container.appendChild(div);
   }
+}
+
+// PI all button handler
+document.getElementById('pi-all-btn').addEventListener('click', selectPiAll);
+
+async function selectPiAll() {
+  currentViewMode = 'pi';
+  currentPiProjectId = null;
+  currentProjectId = null;
+  currentSessionId = null;
+  lastSearchResults = null;
+
+  document.querySelectorAll('.project-item').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.pi-project-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('all-sessions-btn').classList.remove('active');
+  document.getElementById('pi-all-btn').classList.add('active');
+
+  document.getElementById('sessions-header-text').textContent = 'PI';
+
+  const container = document.getElementById('sessions-list');
+  container.textContent = '';
+  container.appendChild(createLoadingEl('Loading PI sessions...'));
+
+  try {
+    const allSessions = [];
+    for (const proj of piProjects) {
+      const result = await apiFetch(`${API}/api/pi/projects/${encodeURIComponent(proj.id)}/sessions`);
+      const sessions = Array.isArray(result) ? result : result.sessions;
+      for (const s of sessions) {
+        s._isPi = true;
+        s._piProjectId = proj.id;
+      }
+      allSessions.push(...sessions);
+    }
+    currentSessions = allSessions;
+  } catch (err) {
+    showError('加载 PI 会话失败: ' + err.message);
+    currentSessions = [];
+  }
+
+  updateStatsBar(currentSessions);
+  renderSessions(currentSessions);
+  renderDetailEmpty();
+}
+
+async function selectPiProject(projectId) {
+  currentViewMode = 'pi';
+  currentPiProjectId = projectId;
+  currentProjectId = null;
+  currentSessionId = null;
+  lastSearchResults = null;
+
+  document.querySelectorAll('.project-item').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.pi-project-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('all-sessions-btn').classList.remove('active');
+  document.getElementById('pi-all-btn').classList.remove('active');
+  document.querySelector(`.pi-project-item[data-project-id="${projectId}"]`).classList.add('active');
+
+  const proj = piProjects.find(p => p.id === projectId);
+  document.getElementById('sessions-header-text').textContent = `PI · ${(proj?.name || projectId).toUpperCase()}`;
+
+  const container = document.getElementById('sessions-list');
+  container.textContent = '';
+  container.appendChild(createLoadingEl('Loading...'));
+
+  try {
+    const result = await apiFetch(`${API}/api/pi/projects/${encodeURIComponent(projectId)}/sessions`);
+    currentSessions = (Array.isArray(result) ? result : result.sessions).map(s => ({ ...s, _isPi: true, _piProjectId: projectId }));
+  } catch (err) {
+    showError('加载 PI 会话失败: ' + err.message);
+    currentSessions = [];
+  }
+
+  updateStatsBar(currentSessions);
+  renderSessions(currentSessions);
+  renderDetailEmpty();
+}
+
+async function selectPiSession(sessionId, piProjectId) {
+  currentSessionId = sessionId;
+  document.querySelectorAll('.session-item').forEach(el => {
+    el.classList.toggle('active', el._sessionId === sessionId);
+  });
+
+  const panel = document.getElementById('detail-panel');
+  panel.textContent = '';
+  panel.appendChild(createLoadingEl('Loading messages...'));
+
+  try {
+    const messages = await apiFetch(`${API}/api/pi/sessions/${encodeURIComponent(piProjectId)}/${encodeURIComponent(sessionId)}`);
+    const session = currentSessions.find(s => s.id === sessionId);
+    renderPiDetail(session, messages, piProjectId);
+  } catch (err) {
+    showError('加载 PI 会话详情失败: ' + err.message);
+    renderDetailEmpty();
+  }
+}
+
+function renderPiDetail(session, messages, piProjectId) {
+  const panel = document.getElementById('detail-panel');
+  panel.textContent = '';
+
+  const header = document.createElement('div');
+  header.className = 'detail-header';
+  const closeBtn = document.createElement('span');
+  closeBtn.className = 'detail-close';
+  closeBtn.textContent = '✕';
+  closeBtn.addEventListener('click', () => {
+    currentSessionId = null;
+    document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+    renderDetailEmpty();
+  });
+
+  const titleSpan = document.createElement('span');
+  titleSpan.className = 'detail-title-text';
+  titleSpan.textContent = 'PI Session';
+
+  const metaSpan = document.createElement('span');
+  metaSpan.className = 'detail-meta';
+  const proj = piProjects.find(p => p.id === piProjectId);
+  metaSpan.textContent = [
+    `~/.pi/agent/sessions/${proj?.name || piProjectId}/${session?.id}.jsonl`,
+    session?.model || '',
+    `${messages.length} messages`,
+    session?.startTime ? formatDate(session.startTime) : '',
+  ].filter(Boolean).join(' · ');
+
+  const exportBtn = document.createElement('button');
+  exportBtn.className = 'export-btn';
+  exportBtn.textContent = '📥 导出 Markdown';
+  exportBtn.addEventListener('click', () => exportPiSession(session?.id, piProjectId));
+
+  header.appendChild(closeBtn);
+  header.appendChild(titleSpan);
+  header.appendChild(metaSpan);
+  header.appendChild(exportBtn);
+  panel.appendChild(header);
+
+  const container = document.createElement('div');
+  container.id = 'messages-container';
+
+  for (const msg of messages) {
+    const div = document.createElement('div');
+    div.className = `message ${msg.role}`;
+    const roleDiv = document.createElement('div');
+    roleDiv.className = 'message-role';
+    roleDiv.textContent = msg.role === 'user' ? '● USER' : '● ASSISTANT';
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+    if (msg.role === 'assistant' && msg.parts) {
+      contentDiv.appendChild(buildAssistantContent(msg.parts));
+    } else {
+      contentDiv.textContent = cleanContent(msg.content || '');
+    }
+    div.appendChild(roleDiv);
+    div.appendChild(contentDiv);
+    if (msg.timestamp) {
+      const timeDiv = document.createElement('div');
+      timeDiv.className = 'message-time';
+      timeDiv.textContent = formatDate(msg.timestamp);
+      div.appendChild(timeDiv);
+    }
+    container.appendChild(div);
+  }
+  panel.appendChild(container);
+}
+
+async function exportPiSession(sessionId, piProjectId) {
+  if (!sessionId || !piProjectId) return;
+  const url = `${API}/api/pi/sessions/${encodeURIComponent(piProjectId)}/${encodeURIComponent(sessionId)}/export`;
+  const response = await fetch(url);
+  if (!response.ok) { showError('导出失败'); return; }
+  const blob = await response.blob();
+  const downloadUrl = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = downloadUrl;
+  a.download = `${sessionId}-pi.md`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.URL.revokeObjectURL(downloadUrl);
+  showToast('✅ 导出成功');
+}
+
+function createLoadingEl(text) {
+  const div = document.createElement('div');
+  div.className = 'loading';
+  const spinner = document.createElement('div');
+  spinner.className = 'loading-spinner';
+  div.appendChild(spinner);
+  div.appendChild(document.createTextNode(text));
+  return div;
+}
+
+function showToast(msg) {
+  let toast = document.getElementById('success-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'success-toast';
+    toast.className = 'success-toast';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.classList.add('visible');
+  setTimeout(() => toast.classList.remove('visible'), 2000);
 }
 
 // ── Refresh ──

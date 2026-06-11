@@ -19,19 +19,26 @@
     <button class="theme-toggle" id="theme-toggle" title="切换深浅主题">🌙</button>
   </div>
   <div class="all-sessions-btn active" id="all-sessions-btn">
-    <span>📋 All CLI</span>
+    <span>📋 Claude Code</span>
     <span class="badge" id="total-sessions-badge">0</span>
   </div>
   <div class="section-label">PROJECTS (<span id="project-count">0</span>)</div>
   <div id="projects-list"></div>
+  <div id="pi-section">
+    <div class="section-label">PI <span class="label-path" id="pi-path">~/.pi/agent/sessions</span></div>
+    <div id="pi-projects-list">
+      <div class="all-sessions-btn" id="pi-all-btn">
+        <span><span class="pi-badge">PI</span> PI</span>
+        <span class="badge" id="pi-total-badge">0</span>
+      </div>
+    </div>
+  </div>
   <div class="source-toggle" id="source-toggle">
     <button class="source-btn active" data-source="live">Live</button>
     <button class="source-btn" data-source="backup">Backup</button>
   </div>
-  <div class="refresh-row">
-    <button class="refresh-btn" id="refresh-btn" title="刷新数据并释放搜索缓存">🔄 刷新 / 清缓存</button>
-    <button class="refresh-btn" id="backup-btn" title="备份会话数据到本地">💾 备份数据</button>
-  </div>
+  <button class="refresh-btn" id="refresh-btn" title="刷新数据并释放搜索缓存">🔄 刷新 / 清缓存</button>
+  <button class="refresh-btn" id="backup-btn" title="备份会话数据到本地">💾 Backup</button>
 </div>
 
 <div class="resize-handle" id="resize-handle-1"></div>
@@ -39,7 +46,7 @@
 <!-- Middle: Sessions -->
 <div id="sessions-panel">
   <div class="sessions-header" id="sessions-header">
-    <span id="sessions-header-text">ALL CLI</span>
+    <span id="sessions-header-text">ALL SESSIONS</span>
     <button class="empty-toggle-btn" id="empty-toggle-btn" style="display:none">🔍 显示空会话</button>
   </div>
   <div class="search-box">

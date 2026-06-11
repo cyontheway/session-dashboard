@@ -4,21 +4,30 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const os = require('os');
-const { execFile } = require('child_process');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const BACKUP_DIR = process.env.BACKUP_DIR;
-const BACKUP_DEST = process.env.BACKUP_DEST || path.join(os.homedir(), 'claude-session-backups');
-const SOURCES = { live: path.join(os.homedir(), '.claude', 'projects') };
-if (BACKUP_DIR) SOURCES.backup = BACKUP_DIR;
+const SOURCES = {
+  live: path.join(os.homedir(), '.claude', 'projects'),
+};
+
+// Optional: set BACKUP_DIR env var to enable backup source
+// e.g. BACKUP_DIR=~/my-backup/projects node server.js
+if (process.env.BACKUP_DIR) {
+  SOURCES.backup = process.env.BACKUP_DIR.replace(/^~/, os.homedir());
+}
+
 let currentSource = 'live';
 let CLAUDE_PROJECTS_DIR = SOURCES.live;
 
 // Data source switching
-app.get('/api/source', (req, res) => res.json({ source: currentSource, path: CLAUDE_PROJECTS_DIR }));
+app.get('/api/source', (req, res) => res.json({
+  source: currentSource,
+  path: CLAUDE_PROJECTS_DIR,
+  available: Object.keys(SOURCES),
+}));
 app.post('/api/source', (req, res) => {
   const s = req.body.source;
   if (!SOURCES[s]) return res.status(400).json({ error: 'Invalid source. Use "live" or "backup".' });
@@ -100,7 +109,6 @@ app.get('/api/projects', async (req, res) => {
 });
 
 // GET /api/projects/:projectId/sessions — list sessions for a project
-// Supports ?limit=N&offset=N for pagination
 app.get('/api/projects/:projectId/sessions', async (req, res) => {
   try {
     const projDir = safePath(CLAUDE_PROJECTS_DIR, req.params.projectId);
@@ -112,30 +120,15 @@ app.get('/api/projects/:projectId/sessions', async (req, res) => {
       return res.status(404).json({ error: 'Project not found' });
     }
 
-    const limit = parseInt(req.query.limit) || 0;
-    const offset = parseInt(req.query.offset) || 0;
-
     const files = (await fs.promises.readdir(projDir)).filter(f => f.endsWith('.jsonl'));
-
-    // Stat all files (fast, no content read) then sort by mtime desc
-    const fileStats = await Promise.all(
-      files.map(async (f) => {
-        const fp = path.join(projDir, f);
-        const stat = await fs.promises.stat(fp);
-        return { file: f, mtimeMs: stat.mtimeMs };
-      })
-    );
-    fileStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-    const total = fileStats.length;
-    const slice = limit > 0 ? fileStats.slice(offset, offset + limit) : fileStats;
-
-    // Only scan content for the visible files
     const sessions = [];
-    for (const { file } of slice) {
+
+    for (const file of files) {
       const sessionId = file.replace('.jsonl', '');
       const filePath = path.join(projDir, file);
       const stat = await fs.promises.stat(filePath);
+
+      // Quick scan: read first and last few lines for metadata
       const meta = await scanSessionMeta(filePath);
 
       sessions.push({
@@ -148,15 +141,12 @@ app.get('/api/projects/:projectId/sessions', async (req, res) => {
         firstUserMessage: meta.firstUserMessage,
         startTime: meta.startTime,
         isEmpty: meta.isEmpty,
-        models: meta.models || [],
       });
     }
 
-    if (limit > 0) {
-      res.json({ sessions, total, offset, limit });
-    } else {
-      res.json(sessions);
-    }
+    // Sort by last modified descending
+    sessions.sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
+    res.json(sessions);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -204,7 +194,6 @@ async function scanSessionMeta(filePath) {
     let firstUserMessage = '';
     let startTime = null;
     let hasRealUserMessage = false;
-    const modelSet = new Set();
 
     const rl = readline.createInterface({
       input: fs.createReadStream(filePath),
@@ -225,9 +214,6 @@ async function scanSessionMeta(filePath) {
               }
             }
           }
-          if (d.type === 'assistant' && d.message?.model) {
-            modelSet.add(d.message.model);
-          }
           if (!startTime && d.timestamp) {
             startTime = d.timestamp;
           }
@@ -240,11 +226,11 @@ async function scanSessionMeta(filePath) {
 
     rl.on('close', () => {
       const isEmpty = messageCount === 0 || !hasRealUserMessage;
-      resolve({ messageCount, title, firstUserMessage, startTime, isEmpty, models: Array.from(modelSet) });
+      resolve({ messageCount, title, firstUserMessage, startTime, isEmpty });
     });
 
     rl.on('error', () => {
-      resolve({ messageCount: 0, title: '', firstUserMessage: '', startTime: null, isEmpty: true, models: [] });
+      resolve({ messageCount: 0, title: '', firstUserMessage: '', startTime: null, isEmpty: true });
     });
   });
 }
@@ -577,36 +563,229 @@ app.get('/api/projects/:projectId/sessions/:sessionId/export', async (req, res) 
   }
 });
 
-// POST /api/backup — backup sessions to local directory
-app.post('/api/backup', async (req, res) => {
-  const backupBase = BACKUP_DEST;
-  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const projectId = req.body.projectId;
-  const src = projectId
-    ? path.join(CLAUDE_PROJECTS_DIR, projectId)
-    : CLAUDE_PROJECTS_DIR;
+// ── PI Agent API ──
+const PI_SESSIONS_DIR = path.join(os.homedir(), '.pi', 'agent', 'sessions');
 
-  try { await fs.promises.access(src); }
-  catch { return res.status(404).json({ error: 'Source not found' }); }
-
-  const destName = projectId
-    ? `session-backup-${projectId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30)}-${dateStr}`
-    : `session-backup-${dateStr}`;
-  const dest = path.join(backupBase, destName);
-
-  await fs.promises.mkdir(backupBase, { recursive: true });
-
+// List pi projects (directories under ~/.pi/agent/sessions/)
+app.get('/api/pi/projects', async (req, res) => {
   try {
-    await new Promise((resolve, reject) => {
-      execFile('cp', ['-r', src, dest], (err) => { if (err) reject(err); else resolve(); });
-    });
-    const du = await new Promise((resolve) => {
-      execFile('du', ['-sh', dest], (err, stdout) => resolve(err ? '?' : stdout.split('\t')[0]));
-    });
-    res.json({ path: dest, size: du });
+    const entries = await fs.promises.readdir(PI_SESSIONS_DIR, { withFileTypes: true }).catch(() => []);
+    const projects = [];
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const projPath = path.join(PI_SESSIONS_DIR, entry.name);
+      const files = (await fs.promises.readdir(projPath)).filter(f => f.endsWith('.jsonl'));
+      const decodedPath = decodeProjectDir(entry.name);
+
+      let lastModified = null;
+      for (const f of files) {
+        const stat = await fs.promises.stat(path.join(projPath, f));
+        if (!lastModified || stat.mtimeMs > lastModified) lastModified = stat.mtimeMs;
+      }
+
+      projects.push({
+        id: entry.name,
+        path: decodedPath,
+        name: decodedPath.split('/').filter(Boolean).pop() || decodedPath,
+        sessionCount: files.length,
+        lastModified: lastModified ? new Date(lastModified).toISOString() : null,
+      });
+    }
+
+    projects.sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
+    res.json(projects);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Scan pi session metadata
+async function scanPiSessionMeta(filePath) {
+  return new Promise((resolve) => {
+    let messageCount = 0, firstUserMessage = '', startTime = null, hasRealUserMessage = false, model = '';
+    const rl = readline.createInterface({ input: fs.createReadStream(filePath), crlfDelay: Infinity });
+    rl.on('line', (line) => {
+      try {
+        const d = JSON.parse(line);
+        if (d.type === 'message') {
+          messageCount++;
+          const msg = d.message || {};
+          if (msg.role === 'user') {
+            const raw = extractText(msg.content);
+            if (raw && !/^<(local-command|command-name|local-command-caveat|local-command-stdout)/.test(raw)) {
+              hasRealUserMessage = true;
+              if (!firstUserMessage) firstUserMessage = raw.slice(0, 120).replace(/<[^>]+>/g, '').trim();
+            }
+          }
+          if (!startTime && d.timestamp) startTime = d.timestamp;
+        } else if (d.type === 'model_change') {
+          if (d.modelId) model = d.modelId;
+        }
+      } catch {}
+    });
+    rl.on('close', () => resolve({ messageCount, firstUserMessage, startTime, isEmpty: messageCount === 0 || !hasRealUserMessage, model }));
+    rl.on('error', () => resolve({ messageCount: 0, firstUserMessage: '', startTime: null, isEmpty: true, model: '' }));
+  });
+}
+
+// Parse pi session messages
+async function parsePiSessionMessages(filePath) {
+  return new Promise((resolve) => {
+    const messages = [];
+    let currentModel = '';
+    const rl = readline.createInterface({ input: fs.createReadStream(filePath), crlfDelay: Infinity });
+    rl.on('line', (line) => {
+      try {
+        const d = JSON.parse(line);
+        if (d.type === 'model_change') { if (d.modelId) currentModel = d.modelId; return; }
+        if (d.type === 'session' || d.type === 'thinking_level_change') return;
+        if (d.type === 'message') {
+          const msg = d.message || {};
+          const timestamp = d.timestamp || msg.timestamp;
+          const content = msg.content;
+          if (msg.role === 'user') {
+            messages.push({ role: 'user', content: extractText(content), timestamp });
+          } else if (msg.role === 'assistant') {
+            const parts = [];
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                if (block.type === 'text' && block.text) parts.push({ type: 'text', text: block.text });
+                else if (block.type === 'tool_use') parts.push({ type: 'tool_use', name: block.name, input: summarizeToolInput(block.input) });
+                else if (block.type === 'tool_result') parts.push({ type: 'tool_result', content: extractText(block.content) });
+              }
+            } else if (typeof content === 'string') {
+              parts.push({ type: 'text', text: content });
+            }
+            if (parts.length > 0) messages.push({ role: 'assistant', parts, model: currentModel, timestamp });
+          }
+        }
+      } catch {}
+    });
+    rl.on('close', () => resolve(messages));
+    rl.on('error', () => resolve([]));
+  });
+}
+
+// Extract all pi session text for search
+async function extractPiSessionText(filePath) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    const rl = readline.createInterface({ input: fs.createReadStream(filePath), crlfDelay: Infinity });
+    rl.on('line', (line) => {
+      try {
+        const d = JSON.parse(line);
+        if (d.type === 'message') { const text = extractText(d.message?.content); if (text) chunks.push(text); }
+      } catch {}
+    });
+    rl.on('close', () => resolve(chunks.join('\n')));
+    rl.on('error', () => resolve(''));
+  });
+}
+
+// GET /api/pi/projects/:projectId/sessions — list sessions for a pi project
+app.get('/api/pi/projects/:projectId/sessions', async (req, res) => {
+  try {
+    const projDir = safePath(PI_SESSIONS_DIR, req.params.projectId);
+    if (!projDir) return res.status(403).json({ error: 'Invalid project path' });
+    try { await fs.promises.access(projDir); } catch { return res.status(404).json({ error: 'Project not found' }); }
+
+    const files = (await fs.promises.readdir(projDir)).filter(f => f.endsWith('.jsonl'));
+    const fileStats = await Promise.all(files.map(async (f) => {
+      const stat = await fs.promises.stat(path.join(projDir, f));
+      return { file: f, mtimeMs: stat.mtimeMs };
+    }));
+    fileStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    const sessions = [];
+    for (const { file } of fileStats) {
+      const sessionId = file.replace('.jsonl', '');
+      const filePath = path.join(projDir, file);
+      const stat = await fs.promises.stat(filePath);
+      const meta = await scanPiSessionMeta(filePath);
+      sessions.push({
+        id: sessionId, file, size: stat.size,
+        lastModified: stat.mtime.toISOString(),
+        messageCount: meta.messageCount, title: meta.firstUserMessage || sessionId.slice(0, 8),
+        firstUserMessage: meta.firstUserMessage, startTime: meta.startTime,
+        isEmpty: meta.isEmpty, model: meta.model, _isPi: true,
+      });
+    }
+    res.json(sessions);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/pi/sessions/:projectId/:sessionId — get full session messages
+app.get('/api/pi/sessions/:projectId/:sessionId', async (req, res) => {
+  try {
+    const filePath = safePath(PI_SESSIONS_DIR, req.params.projectId, req.params.sessionId + '.jsonl');
+    if (!filePath) return res.status(403).json({ error: 'Invalid path' });
+    try { await fs.promises.access(filePath); } catch { return res.status(404).json({ error: 'Session not found' }); }
+    const messages = await parsePiSessionMessages(filePath);
+    res.json(messages);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/pi/sessions/:projectId/:sessionId/export — export as markdown
+app.get('/api/pi/sessions/:projectId/:sessionId/export', async (req, res) => {
+  try {
+    const filePath = safePath(PI_SESSIONS_DIR, req.params.projectId, req.params.sessionId + '.jsonl');
+    if (!filePath) return res.status(403).json({ error: 'Invalid path' });
+    try { await fs.promises.access(filePath); } catch { return res.status(404).json({ error: 'Session not found' }); }
+    const messages = await parsePiSessionMessages(filePath);
+    let md = `# Pi Session\n\n**Session ID:** \${req.params.sessionId}\n**Messages:** \${messages.length}\n\n---\n\n`;
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        md += `## 👤 User\n\n\${msg.content}\n\n`;
+        if (msg.timestamp) md += `*\${new Date(msg.timestamp).toLocaleString('zh-CN')}*\n\n`;
+      } else if (msg.role === 'assistant') {
+        md += `## 🤖 Assistant\n\n`;
+        for (const part of msg.parts || []) {
+          if (part.type === 'text') md += `\${part.text}\n\n`;
+          else if (part.type === 'tool_use') md += `### 🔧 Tool: \${part.name}\n\`\`\`json\n\${JSON.stringify(part.input, null, 2)}\n\`\`\`\n\n`;
+        }
+        if (msg.timestamp) md += `*\${new Date(msg.timestamp).toLocaleString('zh-CN')}*\n\n`;
+      }
+      md += `---\n\n`;
+    }
+    md += `\n*Exported from Session Dashboard*\n`;
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', \`attachment; filename="\${req.params.sessionId}-pi.md"\`);
+    res.send(md);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/pi/search?q=&project= — search pi sessions
+app.get('/api/pi/search', async (req, res) => {
+  try {
+    const query = (req.query.q || '').trim();
+    if (!query) return res.json({ results: [], scanned: 0, total: 0 });
+    const projectId = req.query.project;
+    if (!projectId) return res.status(400).json({ error: 'Missing project parameter' });
+    const projDir = safePath(PI_SESSIONS_DIR, projectId);
+    if (!projDir) return res.status(403).json({ error: 'Invalid project path' });
+    const allFiles = (await fs.promises.readdir(projDir)).filter(f => f.endsWith('.jsonl'));
+    const fileStats = await Promise.all(allFiles.map(async (f) => {
+      const stat = await fs.promises.stat(path.join(projDir, f));
+      return { file: f, mtimeMs: stat.mtimeMs, mtime: stat.mtime };
+    }));
+    fileStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const results = [];
+    const lowerQuery = query.toLowerCase();
+    for (const { file, mtime } of fileStats) {
+      const sessionId = file.replace('.jsonl', '');
+      const text = await extractPiSessionText(path.join(projDir, file));
+      if (text.toLowerCase().includes(lowerQuery) || sessionId.toLowerCase().includes(lowerQuery)) {
+        const idx = text.toLowerCase().indexOf(lowerQuery);
+        const start = Math.max(0, idx - 60);
+        const end = Math.min(text.length, idx + query.length + 60);
+        let snippet = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+        results.push({ sessionId, lastModified: mtime.toISOString(), snippet });
+      }
+      if (results.length >= 100) break;
+    }
+    res.json({ results, scanned: fileStats.length, total: fileStats.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Expose health status via API

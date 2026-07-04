@@ -1242,7 +1242,7 @@ function renderPiDetail(session, messages, piProjectId) {
   metaSpan.className = 'detail-meta';
   const proj = piProjects.find(p => p.id === piProjectId);
   metaSpan.textContent = [
-    `~/.pi/agent/sessions/${proj?.name || piProjectId}/${session?.id}.jsonl`,
+    `~/.pi/agent/sessions/${proj?.id || piProjectId}/${session?.id}.jsonl`,
     session?.model || '',
     `${messages.length} messages`,
     session?.startTime ? formatDate(session.startTime) : '',

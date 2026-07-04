@@ -2,6 +2,10 @@
 
 > CLI + PI 发布版。完整增强版（含 Cowork）见 `session-dashboard/`。
 
+## 3.3.1 (2026-07-04)
+
+- **PI 会话详情路径修复**：detail header 中 PI 会话文件路径使用实际目录名（`proj.id`）而非解码显示名（`proj.name`），修复路径与文件系统不一致的问题
+
 ## 3.3.0 (2026-06-11)
 
 - **PI Agent 会话支持**：读取 `~/.pi/agent/sessions/`，左栏 PI 面板按项目分组，含列表/详情/导出/全文搜索
